@@ -5,8 +5,10 @@ import string
 from Crypto.Cipher import AES
 from more_itertools import padded
 import os
+from numpy import block
 
 from pyrsistent import b
+from requests import get
 from set1 import is_ecb_encrypted
 
 def bytes_xor(string1:bytes, string2:bytes) -> bytes:
@@ -66,7 +68,6 @@ def split_bytes_by_blocksize(text:bytes, blocksize:int = 16) -> list[bytes]:
         blocks.append(text[-(len(text) % blocksize):])
     return blocks
 
-
 class ECB_Oracle:
     data = '''Um9sbGluJyBpbiBteSA1LjAKV2l0aCBteSByYWctdG9wIGRvd24gc28gbXkg
     aGFpciBjYW4gYmxvdwpUaGUgZ2lybGllcyBvbiBzdGFuZGJ5IHdhdmluZyBq
@@ -84,6 +85,42 @@ class ECB_Oracle:
         if front_padding:
             to_encrypt = self.front_padding  + to_encrypt
         return ecb_encrypt(to_encrypt, self.key)
+
+def ecb_get_one_more_byte(oracle: ECB_Oracle, blocksize=16, has_front_padding=False, first_different_block=-1, needed_front_padding_len=-1) -> str:
+    
+    ciphertext = oracle.encrypt()
+    plaintext_length = len(ciphertext)
+
+    for i in range(blocksize):
+        length = len(cipher.encrypt('A'*i))
+        if length != plaintext_length:
+            plaintext_length -= i
+            break
+    
+    if has_front_padding:
+        plaintext_length -= first_different_block * blocksize + (blocksize - needed_front_padding_len)
+
+    known_plaintext = ''
+    for _ in range(plaintext_length):
+        padding_len = blocksize - (len(known_plaintext) % blocksize) - 1
+        if has_front_padding:
+            padding_len -= first_different_block * blocksize + (blocksize - needed_front_padding_len)
+        padding = 'A'*padding_len
+        
+        new_ciphertext = cipher.encrypt(padding)
+
+        for i in range(256):
+            testing_msg = padding + known_plaintext + chr(i)
+            encrypted_testing_msg = cipher.encrypt(testing_msg)
+            if encrypted_testing_msg[:len(testing_msg)] == new_ciphertext[:len(testing_msg)]:
+                if (len(known_plaintext) != 138):
+                    known_plaintext += chr(i)
+                    break
+            if (i == 255):
+                print("Failed to find the next byte")
+                exit(1)
+
+    return known_plaintext
 
 class Profile_Manager:
     def __init__(self):
@@ -112,17 +149,28 @@ class Profile_Manager:
             dict[k] = v
         return dict
 
-def get_front_padding_len_from_oracle(oracle: ECB_Oracle, blocksize=16) -> int:
+def get_front_padding_len_from_oracle(oracle: ECB_Oracle, blocksize=16) -> (int, int):
     clean_ciphertext = oracle.encrypt(front_padding=True)
     one_byte_padding_ciphertext = oracle.encrypt(msg='A', front_padding=True)
 
     # Find the first block that is different from the clean ciphertext
     # edge case: padding is a multiple of blocksize, will find a block of 'A's
+    first_different_block = -1
     for i in range(len(clean_ciphertext) // blocksize + 1):
         if clean_ciphertext[i*blocksize:(i+1)*blocksize] != one_byte_padding_ciphertext[i*blocksize:(i+1)*blocksize]:
             first_different_block = i
-
-
+            break
+    assert first_different_block != -1
+    
+    # edge case padding_len = 0
+    padding_len = 0
+    for i in range(1, blocksize):
+        padding_ciphertxt = oracle.encrypt(msg='A'*i, front_padding=True)
+        if padding_ciphertxt[first_different_block*blocksize:(first_different_block+1)*blocksize] == clean_ciphertext[first_different_block*blocksize:(first_different_block+1)*blocksize]:
+            padding_len = i
+            break
+    
+    return first_different_block, padding_len
 
 if __name__ == '__main__':
 
@@ -242,31 +290,7 @@ if __name__ == '__main__':
     ciphertext = cipher.encrypt()
     
     # find plaintext length 
-    plaintext_length = len(ciphertext)
-    for i in range(16):
-        length = len(cipher.encrypt('A'*i))
-        if length != plaintext_length:
-            plaintext_length -= i
-            break
-
-    known_plaintext = ''
-    blocksize = 16
-    for _ in range(plaintext_length):
-        padding_len = blocksize - (len(known_plaintext) % blocksize) - 1
-        padding = 'A'*padding_len
-        
-        new_ciphertext = cipher.encrypt(padding)
-
-        for i in range(256):
-            testing_msg = padding + known_plaintext + chr(i)
-            encrypted_testing_msg = cipher.encrypt(testing_msg)
-            if encrypted_testing_msg[:len(testing_msg)] == new_ciphertext[:len(testing_msg)]:
-                if (len(known_plaintext) != 138):
-                    known_plaintext += chr(i)
-                    break
-            if (i == 255):
-                print("Failed to find the next byte")
-                exit(1)
+ 
     assert known_plaintext == b64decode(cipher.data).decode()
     print("Successfully decrypted the ciphertext with 'byte-at-a-time decryption\n")
     print(f"Plaintext: {known_plaintext}")
@@ -337,10 +361,6 @@ if __name__ == '__main__':
     oracle = ECB_Oracle()
     
     # Assumption 
-    prev_len = len(oracle.encrypt())
-    start_padding_len = -1
-    for i in range(16):
-        new_len = len(oracle.encrypt('A'*i))
-        if new_len != prev_len:
+    first_different_block, padding_len = get_front_padding_len_from_oracle(oracle)
             
 
